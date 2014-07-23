@@ -69,5 +69,13 @@ module LogStash
     def locales_path(path)
       return ::File.join(LOGSTASH_HOME, "locales", path)
     end
+
+    def load_locale!
+      require "i18n"
+      I18n.enforce_available_locales = true
+      I18n.load_path << LogStash::Environment.locales_path("en.yml")
+      I18n.reload!
+      fail "No locale? This is a bug." if I18n.available_locales.empty?
+    end
   end
 end
