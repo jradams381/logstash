@@ -41,6 +41,9 @@ class LogStash::Inputs::S3 < LogStash::Inputs::Base
   # If specified, the prefix the filenames in the bucket must match (not a regexp)
   config :prefix, :validate => :string, :default => nil
 
+  # If specified, the regex the object key must match (definitely a regex)
+  config :pattern, :validate => :string, :default => ".*"
+
   # Where to write the since database (keeps track of the date
   # the last handled file was added to S3). The default will write
   # sincedb files to some path matching "$HOME/.sincedb*"
@@ -165,11 +168,13 @@ class LogStash::Inputs::S3 < LogStash::Inputs::Base
     end
 
     objects = {}
-    @s3bucket.objects.with_prefix(@prefix).each do |log|
-      if log.last_modified > since
-        objects[log.key] = log.last_modified
-      end
-    end
+    @s3bucket.objects
+      .with_prefix(@prefix)
+      .select { |obj| obj.last_modified > since }
+      .select { |obj| obj.key =~ Regexp.new(@pattern)}
+      .each do |obj|
+          objects[obj.key] = obj.last_modified
+        end
 
     return sorted_objects = objects.keys.sort {|a,b| objects[a] <=> objects[b]}
 
@@ -187,7 +192,7 @@ class LogStash::Inputs::S3 < LogStash::Inputs::Base
           s3file.write(chunk)
         end
       end
-      process_local_log(queue, filename)
+      process_local_log(queue, filename, key)
       unless @backup_to_bucket.nil?
         backup_object = @backup_bucket.objects[key]
         backup_object.write(Pathname.new(filename))
@@ -204,21 +209,17 @@ class LogStash::Inputs::S3 < LogStash::Inputs::Base
   end # def process_log
 
   private
-  def process_local_log(queue, filename)
+  def process_local_log(queue, filename, key)
 
-    metadata = {
-      :version => nil,
-      :format => nil,
-    }
-    File.open(filename) do |file|
+    File.open(filename, "r:UTF-8") do |file|
       if filename.end_with?('.gz')
         gz = Zlib::GzipReader.new(file)
         gz.each_line do |line|
-          metadata = process_line(queue, metadata, line)
+          process_line(queue, line, key)
         end
       else
         file.each do |line|
-          metadata = process_line(queue, metadata, line)
+          process_line(queue, line, key)
         end
       end
     end
@@ -226,31 +227,13 @@ class LogStash::Inputs::S3 < LogStash::Inputs::Base
   end # def process_local_log
 
   private
-  def process_line(queue, metadata, line)
+  def process_line(queue, line, key)
 
-    if /#Version: .+/.match(line)
-      junk, version = line.strip().split(/#Version: (.+)/)
-      unless version.nil?
-        metadata[:version] = version
-      end
-    elsif /#Fields: .+/.match(line)
-      junk, format = line.strip().split(/#Fields: (.+)/)
-      unless format.nil?
-        metadata[:format] = format
-      end
-    else
-      @codec.decode(line) do |event|
-        decorate(event)
-        unless metadata[:version].nil?
-          event["cloudfront_version"] = metadata[:version]
-        end
-        unless metadata[:format].nil?
-          event["cloudfront_fields"] = metadata[:format]
-        end
-        queue << event
-      end
+    @codec.decode(line) do |event|
+      decorate(event)
+      event["path"] = key
+      queue << event
     end
-    return metadata
 
   end # def process_line
 
